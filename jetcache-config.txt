@@ -1,0 +1,201 @@
+
+spring:
+  redis:
+    # Data Node password
+    password: "data_node_password"
+    database: 0
+    sentinel:
+      master: mymaster
+      nodes: host1:26379,host2:26379
+      # Sentinel Node password
+      password: "sentinel_node_password"
+
+
+@Configuration
+public class JetCacheRedisConfig {
+
+    @Autowired
+    private RedisProperties redisProperties;
+
+    @Bean(name = "defaultClient")
+    // Only loads if spring.redis.sentinel.master is defined in application.yml
+    @ConditionalOnProperty(name = "spring.redis.sentinel.master")
+    public RedisClient redisClient() {
+        RedisProperties.Sentinel sentinelProps = redisProperties.getSentinel();
+        
+        // Custom logic to handle separate Sentinel passwords
+        RedisURI.Builder builder = RedisURI.Builder
+            .sentinel(sentinelProps.getNodes().get(0).split(":")[0], 
+                      Integer.parseInt(sentinelProps.getNodes().get(0).split(":")[1]))
+            .withSentinelMasterId(sentinelProps.getMaster())
+            .withPassword(redisProperties.getPassword().toCharArray())
+            .withDatabase(redisProperties.getDatabase());
+
+        // Add other nodes and apply Sentinel-specific password
+        sentinelProps.getNodes().stream().skip(1).forEach(node -> {
+            String[] parts = node.split(":");
+            builder.withSentinel(parts[0], Integer.parseInt(parts[1]));
+        });
+
+        RedisURI redisUri = builder.build();
+        if (sentinelProps.getPassword() != null) {
+            redisUri.getSentinels().forEach(s -> s.setPassword(sentinelProps.getPassword()));
+        }
+
+        return RedisClient.create(redisUri);
+    }
+}
+
+
+
+// Refactored code
+
+@Configuration
+public class JetCacheRedisConfig {
+
+    private final RedisProperties redisProperties;
+
+    public JetCacheRedisConfig(RedisProperties redisProperties) {
+        this.redisProperties = redisProperties;
+    }
+
+    @Bean(name = "defaultClient")
+    @ConditionalOnProperty(name = "spring.redis.sentinel.master")
+    public RedisClient redisClient() {
+        RedisProperties.Sentinel sentinel = redisProperties.getSentinel();
+        
+        // Initialize the builder with the first node and master ID
+        RedisURI.Builder builder = createBaseBuilder(sentinel);
+
+        // Apply global properties
+        builder.withPassword(redisProperties.getPassword())
+               .withDatabase(redisProperties.getDatabase());
+
+        // Build and apply Sentinel-specific credentials if they exist
+        RedisURI redisUri = builder.build();
+        Optional.ofNullable(sentinel.getPassword())
+                .ifPresent(pw -> redisUri.getSentinels().forEach(s -> s.setPassword(pw)));
+
+        return RedisClient.create(redisUri);
+    }
+
+    private RedisURI.Builder createBaseBuilder(RedisProperties.Sentinel sentinel) {
+        if (sentinel.getNodes() == null || sentinel.getNodes().isEmpty()) {
+            throw new IllegalStateException("Sentinel nodes must be configured when master is defined.");
+        }
+
+        RedisURI.Builder builder = null;
+
+        for (String node : sentinel.getNodes()) {
+            String[] parts = node.split(":");
+            String host = parts[0];
+            int port = (parts.length > 1) ? Integer.parseInt(parts[1]) : 26379; // Default Sentinel port
+
+            if (builder == null) {
+                builder = RedisURI.Builder.sentinel(host, port, sentinel.getMaster());
+            } else {
+                builder.withSentinel(host, port);
+            }
+        }
+
+        return builder;
+    }
+}
+
+
+//Refactored code with JavaDoc
+
+import io.lettuce.core.RedisClient;
+import io.lettuce.core.RedisURI;
+import org.springframework.boot.autoconfigure.data.redis.RedisProperties;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+import java.util.Optional;
+
+/**
+ * Configuration class for JetCache Redis integration using Lettuce.
+ * <p>
+ * This configuration specifically handles Redis Sentinel deployments and allows for
+ * the distinct configuration of master and sentinel credentials, which is common in
+ * secured enterprise environments.
+ */
+@Configuration
+public class JetCacheRedisConfig {
+
+    private final RedisProperties redisProperties;
+
+    /**
+     * Constructs the configuration with Spring's injected Redis properties.
+     *
+     * @param redisProperties the auto-configured Redis properties from application.yml/properties
+     */
+    public JetCacheRedisConfig(RedisProperties redisProperties) {
+        this.redisProperties = redisProperties;
+    }
+
+    /**
+     * Creates a {@link RedisClient} bean configured for Sentinel mode.
+     * <p>
+     * This bean is only initialized if {@code spring.redis.sentinel.master} is present in
+     * the environment configuration. It maps standard Spring Redis properties to the 
+     * Lettuce-specific URI structure.
+     *
+     * @return a configured Lettuce {@link RedisClient}
+     * @throws IllegalStateException if sentinel nodes are missing while sentinel mode is active
+     */
+    @Bean(name = "defaultClient")
+    @ConditionalOnProperty(name = "spring.redis.sentinel.master")
+    public RedisClient redisClient() {
+        RedisProperties.Sentinel sentinel = redisProperties.getSentinel();
+        
+        // Initialize the builder with the first node and master ID
+        RedisURI.Builder builder = createBaseBuilder(sentinel);
+
+        // Apply global database and password settings
+        builder.withPassword(redisProperties.getPassword())
+               .withDatabase(redisProperties.getDatabase());
+
+        // Build and apply Sentinel-specific credentials if they exist
+        RedisURI redisUri = builder.build();
+        Optional.ofNullable(sentinel.getPassword())
+                .ifPresent(pw -> redisUri.getSentinels().forEach(s -> s.setPassword(pw)));
+
+        return RedisClient.create(redisUri);
+    }
+
+    /**
+     * Parses the configured sentinel nodes and initializes the URI builder.
+     * <p>
+     * It iterates through the list of "host:port" strings. If a port is omitted, 
+     * it defaults to the standard Redis Sentinel port (26379).
+     *
+     * @param sentinel the sentinel configuration properties
+     * @return a {@link RedisURI.Builder} populated with all sentinel node addresses
+     * @throws IllegalStateException if the node list is null or empty
+     */
+    private RedisURI.Builder createBaseBuilder(RedisProperties.Sentinel sentinel) {
+        if (sentinel.getNodes() == null || sentinel.getNodes().isEmpty()) {
+            throw new IllegalStateException("Sentinel nodes must be configured when master is defined.");
+        }
+
+        RedisURI.Builder builder = null;
+
+        for (String node : sentinel.getNodes()) {
+            String[] parts = node.split(":");
+            String host = parts[0];
+            int port = (parts.length > 1) ? Integer.parseInt(parts[1]) : 26379;
+
+            if (builder == null) {
+                // The first node defines the starting point for the builder
+                builder = RedisURI.Builder.sentinel(host, port, sentinel.getMaster());
+            } else {
+                // Subsequent nodes are added as additional sentinels
+                builder.withSentinel(host, port);
+            }
+        }
+
+        return builder;
+    }
+}
