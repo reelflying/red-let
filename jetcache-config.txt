@@ -432,3 +432,191 @@ public class JetCacheRedisConfig {
                 .valueDecoder(JetCacheCodec.INSTANCE::decode);
     }
 }
+
+
+// g version
+package com.example.config;
+
+import com.alicp.jetcache.CacheBuilder;
+import com.alicp.jetcache.redis.lettuce.JetCacheCodec;
+import com.alicp.jetcache.redis.lettuce.RedisLettuceCacheBuilder;
+import com.alicp.jetcache.support.FastjsonKeyConvertor;
+import com.alicp.jetcache.support.JacksonKeyConvertor;
+import com.alicp.jetcache.support.JavaValueDecoder;
+import com.alicp.jetcache.support.JavaValueEncoder;
+import com.alicp.jetcache.support.KeyConvertor;
+import io.lettuce.core.AbstractRedisClient;
+import io.lettuce.core.RedisClient;
+import io.lettuce.core.RedisURI;
+import io.lettuce.core.api.StatefulConnection;
+import io.lettuce.core.masterreplica.MasterReplica;
+import io.lettuce.core.pubsub.StatefulRedisPubSubConnection;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
+import org.springframework.boot.autoconfigure.data.redis.RedisProperties;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.Environment;
+
+/**
+ * Custom Redis configuration for JetCache using Lettuce.
+ * * <p>Why this exists:
+ * JetCache 2.7.9's {@code RedisLettuceAutoConfiguration} instantiates its own {@link RedisClient}
+ * and does not support separate passwords for Sentinel nodes. This configuration manually
+ * wires the JetCache beans to support complex authentication.
+ * * <p>Features:
+ * <ul>
+ * <li>Full support for Sentinel node authentication (Sentinel Password).</li>
+ * <li>Standard Redis password support for Data nodes.</li>
+ * <li>Dynamic switching between Sentinel and Standalone based on {@code RedisProperties}.</li>
+ * <li>Manual injection of {@link RedisLettuceCacheBuilder} to bypass auto-init issues.</li>
+ * </ul>
+ */
+@Configuration
+@ConditionalOnBean(RedisProperties.class)
+public class JetCacheRedisConfig {
+
+    /**
+     * Builds the {@link RedisURI} from Spring's {@link RedisProperties}.
+     * * <p>In Sentinel mode, it iterates through the sentinel nodes and manually sets the
+     * password for each node, as the Lettuce Builder does not provide a global 
+     * {@code withSentinelPassword} method.
+     * * @param redisProperties Injected Spring Boot Redis properties
+     * @return Fully configured RedisURI with necessary credentials
+     */
+    @Bean
+    public RedisURI jetCacheRedisURI(RedisProperties redisProperties) {
+        RedisProperties.Sentinel sentinel = redisProperties.getSentinel();
+
+        // Check if Sentinel is configured
+        if (sentinel != null && sentinel.getNodes() != null && !sentinel.getNodes().isEmpty()) {
+            RedisURI.Builder builder = RedisURI.builder()
+                    .withSentinelMasterId(sentinel.getMaster());
+
+            for (String node : sentinel.getNodes()) {
+                String[] parts = node.split(":");
+                String host = parts[0];
+                int port = (parts.length > 1) ? Integer.parseInt(parts[1]) : 26379;
+                builder.withSentinel(host, port);
+            }
+
+            // Set Data Node Password
+            if (redisProperties.getPassword() != null) {
+                builder.withPassword(redisProperties.getPassword().toCharArray());
+            }
+
+            RedisURI finalUri = builder.build();
+
+            // Manually inject Sentinel Password into each node's URI
+            if (sentinel.getPassword() != null) {
+                finalUri.getSentinels().forEach(s -> s.setPassword(sentinel.getPassword()));
+            }
+
+            finalUri.setDatabase(redisProperties.getDatabase());
+            return finalUri;
+        }
+
+        // Fallback: Standalone Mode
+        RedisURI.Builder builder = RedisURI.builder()
+                .withHost(redisProperties.getHost() != null ? redisProperties.getHost() : "localhost")
+                .withPort(redisProperties.getPort() != null ? redisProperties.getPort() : 6379)
+                .withDatabase(redisProperties.getDatabase());
+
+        if (redisProperties.getPassword() != null) {
+            builder.withPassword(redisProperties.getPassword().toCharArray());
+        }
+
+        return builder.build();
+    }
+
+    /**
+     * Creates the Lettuce RedisClient.
+     * * @param redisURI The authenticated URI
+     * @return A thread-safe RedisClient
+     */
+    @Bean(destroyMethod = "shutdown")
+    public AbstractRedisClient jetCacheRedisClient(RedisURI redisURI) {
+        return RedisClient.create(redisURI);
+    }
+
+    /**
+     * Creates the primary connection for cache data operations.
+     * * <p>If Sentinel is detected, it uses {@link MasterReplica#connect} to ensure
+     * automatic failover and topology discovery.
+     * * @param client The Redis client
+     * @param redisURI The configured URI
+     * @return Connection for Redis commands
+     */
+    @Bean(destroyMethod = "close")
+    public StatefulConnection<byte[], byte[]> jetCacheConnection(
+            AbstractRedisClient client,
+            RedisURI redisURI) {
+
+        if (redisURI.getSentinelMasterId() != null) {
+            // MasterReplica handles sentinel topology updates automatically
+            return MasterReplica.connect((RedisClient) client, new JetCacheCodec(), redisURI);
+        } else {
+            return ((RedisClient) client).connect(new JetCacheCodec(), redisURI);
+        }
+    }
+
+    /**
+     * Creates a dedicated connection for Redis Pub/Sub.
+     * Required for JetCache's remote cache invalidation (broadcastChannel).
+     * * @param client The Redis client
+     * @param redisURI The configured URI
+     * @return Pub/Sub connection
+     */
+    @Bean(destroyMethod = "close")
+    public StatefulRedisPubSubConnection<byte[], byte[]> jetCachePubSubConnection(
+            AbstractRedisClient client,
+            RedisURI redisURI) {
+        return ((RedisClient) client).connectPubSub(new JetCacheCodec(), redisURI);
+    }
+
+    /**
+     * Configures the JetCache CacheBuilder for Redis.
+     * * <p>By providing this bean, JetCache's {@code RedisLettuceAutoInit} will recognize 
+     * the manual configuration and use our custom connections.
+     * * @param connection Primary data connection
+     * @param pubSubConnection Secondary pub/sub connection
+     * @param client The Lettuce client
+     * @param env Spring Environment for property resolution
+     * @return Configured RedisLettuceCacheBuilder
+     */
+    @Bean
+    public CacheBuilder<?> jetCacheRemoteCacheBuilder(
+            StatefulConnection<byte[], byte[]> connection,
+            StatefulRedisPubSubConnection<byte[], byte[]> pubSubConnection,
+            AbstractRedisClient client,
+            Environment env) {
+
+        return RedisLettuceCacheBuilder.createRedisLettuceCacheBuilder()
+                .connection(connection)
+                .pubSubConnection(pubSubConnection)
+                .redisClient(client)
+                .keyConvertor(resolveKeyConvertor(env))
+                .valueEncoder(JavaValueEncoder.INSTANCE)
+                .valueDecoder(JavaValueDecoder.INSTANCE);
+    }
+
+    /**
+     * Resolves the {@link KeyConvertor} based on the property
+     * {@code jetcache.remote.default.keyConvertor}.
+     */
+    private KeyConvertor resolveKeyConvertor(Environment env) {
+        String key = env.getProperty("jetcache.remote.default.keyConvertor", "fastjson");
+
+        return switch (key.toLowerCase()) {
+            case "fastjson" -> FastjsonKeyConvertor.INSTANCE;
+            case "jackson" -> JacksonKeyConvertor.INSTANCE;
+            case "none" -> KeyConvertor.NONE;
+            default -> {
+                try {
+                    yield (KeyConvertor) Class.forName(key).getDeclaredConstructor().newInstance();
+                } catch (Exception e) {
+                    yield FastjsonKeyConvertor.INSTANCE;
+                }
+            }
+        };
+    }
+}
