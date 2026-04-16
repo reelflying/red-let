@@ -214,6 +214,10 @@ package com.example.config;
 import com.alicp.jetcache.CacheBuilder;
 import com.alicp.jetcache.redis.lettuce.JetCacheCodec;
 import com.alicp.jetcache.redis.lettuce.RedisLettuceCacheBuilder;
+import com.alicp.jetcache.support.Fastjson2KeyConvertor;
+import com.alicp.jetcache.support.FastjsonKeyConvertor;
+import com.alicp.jetcache.support.JacksonKeyConvertor;
+import com.alicp.jetcache.support.KeyConvertor;
 import io.lettuce.core.AbstractRedisClient;
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.RedisURI;
@@ -224,6 +228,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.data.redis.RedisProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.Environment;
 
 /**
  * Custom Redis configuration for JetCache using Lettuce.
@@ -231,31 +236,31 @@ import org.springframework.context.annotation.Configuration;
  * <p>
  * This configuration replaces JetCache's default Redis auto-configuration to support:
  * <ul>
- *     <li>Redis Sentinel with authentication (both Redis and Sentinel passwords)</li>
- *     <li>Standalone Redis for local development</li>
- *     <li>JetCache broadcastChannel via Redis Pub/Sub</li>
+ *     <li>Redis Sentinel with authentication (Redis + Sentinel passwords)</li>
+ *     <li>Standalone Redis (for local development)</li>
+ *     <li>JetCache broadcastChannel (Pub/Sub)</li>
+ *     <li>Configurable keyConvertor via application.yml</li>
  * </ul>
  *
  * <p>
- * Why this is needed:
+ * Why this exists:
  * <ul>
- *     <li>JetCache (2.7.x) does NOT support Sentinel password in its default auto-config</li>
- *     <li>Spring Data Redis DOES support Sentinel password correctly</li>
- *     <li>We bridge that gap by building RedisURI manually from Spring properties</li>
+ *     <li>JetCache 2.7.x does NOT support Sentinel password in its auto-config</li>
+ *     <li>We rebuild RedisURI from Spring configuration to ensure full compatibility</li>
  * </ul>
  *
  * <p>
  * Behaviour:
  * <ul>
- *     <li>If {@code spring.redis.sentinel.nodes} is present → Sentinel mode</li>
- *     <li>Otherwise → standalone Redis mode (local dev)</li>
+ *     <li>If {@code spring.redis.sentinel.nodes} exists → Sentinel mode</li>
+ *     <li>Otherwise → standalone mode</li>
  * </ul>
  *
  * <p>
  * IMPORTANT:
  * <ul>
- *     <li>You MUST exclude {@code RedisLettuceAutoConfiguration}</li>
- *     <li>This class becomes the single source of truth for JetCache Redis connections</li>
+ *     <li>You MUST exclude RedisLettuceAutoConfiguration</li>
+ *     <li>This class becomes the single source of truth for JetCache Redis setup</li>
  * </ul>
  */
 @Configuration
@@ -263,26 +268,10 @@ import org.springframework.context.annotation.Configuration;
 public class JetCacheRedisConfig {
 
     /**
-     * Builds a RedisURI based on Spring Boot RedisProperties.
+     * Build RedisURI from Spring RedisProperties.
      *
      * <p>
-     * Supports two modes:
-     * <ul>
-     *     <li><b>Sentinel mode:</b> when sentinel nodes are configured</li>
-     *     <li><b>Standalone mode:</b> fallback for local development</li>
-     * </ul>
-     *
-     * <p>
-     * In Sentinel mode, this includes:
-     * <ul>
-     *     <li>Sentinel nodes</li>
-     *     <li>Sentinel master ID</li>
-     *     <li>Redis password</li>
-     *     <li>Sentinel password</li>
-     * </ul>
-     *
-     * @param redisProperties Spring Redis configuration
-     * @return fully configured RedisURI
+     * Supports both Sentinel and standalone modes.
      */
     @Bean
     public RedisURI jetCacheRedisURI(RedisProperties redisProperties) {
@@ -312,7 +301,7 @@ public class JetCacheRedisConfig {
             return builder.build();
         }
 
-        // Standalone mode (local/dev)
+        // Standalone mode
         RedisURI.Builder builder = RedisURI.builder()
                 .withHost(redisProperties.getHost() != null ? redisProperties.getHost() : "localhost")
                 .withPort(redisProperties.getPort() != null ? redisProperties.getPort() : 6379)
@@ -326,43 +315,27 @@ public class JetCacheRedisConfig {
     }
 
     /**
-     * Creates a RedisClient instance.
+     * Create Redis client.
      *
      * <p>
-     * Behaviour differs slightly by mode:
-     * <ul>
-     *     <li>Sentinel mode → client created without binding to a single node</li>
-     *     <li>Standalone mode → client bound to the RedisURI</li>
-     * </ul>
-     *
-     * @param redisURI constructed RedisURI
-     * @return Lettuce Redis client
+     * Sentinel mode uses dynamic topology resolution.
+     * Standalone mode binds directly to the URI.
      */
     @Bean(destroyMethod = "shutdown")
     public AbstractRedisClient jetCacheRedisClient(RedisURI redisURI) {
-
         if (redisURI.getSentinelMasterId() != null) {
-            // Sentinel mode: topology resolved dynamically
             return RedisClient.create();
         } else {
-            // Standalone mode
             return RedisClient.create(redisURI);
         }
     }
 
     /**
-     * Creates the main Redis connection used by JetCache for data operations.
+     * Main Redis connection for cache operations.
      *
      * <p>
-     * Behaviour:
-     * <ul>
-     *     <li>Sentinel mode → uses MasterReplica (auto failover support)</li>
-     *     <li>Standalone mode → direct connection</li>
-     * </ul>
-     *
-     * @param client Redis client
-     * @param redisURI Redis connection definition
-     * @return stateful Redis connection
+     * Sentinel mode → MasterReplica (auto failover)
+     * Standalone mode → direct connection
      */
     @Bean(destroyMethod = "close")
     public StatefulConnection<byte[], byte[]> jetCacheConnection(
@@ -377,21 +350,11 @@ public class JetCacheRedisConfig {
     }
 
     /**
-     * Creates a Pub/Sub connection for JetCache broadcastChannel.
+     * Pub/Sub connection for JetCache broadcastChannel.
      *
      * <p>
-     * This is required for cache invalidation across multiple application instances.
-     *
-     * <p>
-     * IMPORTANT:
-     * <ul>
-     *     <li>Uses the same RedisURI to ensure identical authentication and topology</li>
-     *     <li>Works in both Sentinel and standalone modes</li>
-     * </ul>
-     *
-     * @param client Redis client
-     * @param redisURI Redis connection definition
-     * @return pub/sub connection
+     * Required for distributed cache invalidation.
+     * Uses the same RedisURI to ensure identical auth + topology.
      */
     @Bean(destroyMethod = "close")
     public StatefulRedisPubSubConnection<byte[], byte[]> jetCachePubSubConnection(
@@ -402,32 +365,69 @@ public class JetCacheRedisConfig {
     }
 
     /**
-     * Configures JetCache Redis cache builder.
+     * Resolve KeyConvertor from configuration.
      *
      * <p>
-     * This bean is the core integration point with JetCache.
-     * It wires together:
-     * <ul>
-     *     <li>Data connection</li>
-     *     <li>Pub/Sub connection (broadcastChannel)</li>
-     *     <li>Redis client</li>
-     * </ul>
+     * Reads:
+     * {@code jetcache.remote.default.keyConvertor}
      *
-     * @param connection main Redis connection
-     * @param pubSubConnection pub/sub connection
-     * @param client Redis client
-     * @return JetCache CacheBuilder
+     * <p>
+     * Supported values:
+     * <ul>
+     *     <li>fastjson2 (default)</li>
+     *     <li>fastjson</li>
+     *     <li>jackson</li>
+     *     <li>none</li>
+     *     <li>fully qualified class name</li>
+     * </ul>
+     */
+    private KeyConvertor resolveKeyConvertor(Environment env) {
+        String key = env.getProperty("jetcache.remote.default.keyConvertor", "fastjson2");
+
+        switch (key.toLowerCase()) {
+            case "fastjson2":
+                return new Fastjson2KeyConvertor();
+            case "fastjson":
+                return new FastjsonKeyConvertor();
+            case "jackson":
+                return new JacksonKeyConvertor();
+            case "none":
+                return KeyConvertor.NONE;
+            default:
+                try {
+                    return (KeyConvertor) Class.forName(key)
+                            .getDeclaredConstructor()
+                            .newInstance();
+                } catch (Exception e) {
+                    throw new IllegalArgumentException("Invalid keyConvertor: " + key, e);
+                }
+        }
+    }
+
+    /**
+     * JetCache Redis builder.
+     *
+     * <p>
+     * Wires:
+     * <ul>
+     *     <li>data connection</li>
+     *     <li>pub/sub connection</li>
+     *     <li>Redis client</li>
+     *     <li>keyConvertor from config</li>
+     * </ul>
      */
     @Bean
     public CacheBuilder<?> jetCacheRemoteCacheBuilder(
             StatefulConnection<byte[], byte[]> connection,
             StatefulRedisPubSubConnection<byte[], byte[]> pubSubConnection,
-            AbstractRedisClient client) {
+            AbstractRedisClient client,
+            Environment env) {
 
         return RedisLettuceCacheBuilder.createRedisLettuceCacheBuilder()
                 .connection(connection)
                 .pubSubConnection(pubSubConnection)
                 .redisClient(client)
+                .keyConvertor(resolveKeyConvertor(env))
                 .valueEncoder(JetCacheCodec.INSTANCE::encode)
                 .valueDecoder(JetCacheCodec.INSTANCE::decode);
     }
