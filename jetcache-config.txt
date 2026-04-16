@@ -643,3 +643,33 @@ public class JetCacheRedisConfig {
                 }
             }
         };
+
+
+/**
+ * Resolves the key converter function.
+ * This version uses traditional switch syntax to ensure compatibility with Java 8/11.
+ * * @param env Spring Environment
+ * @return The resolved key conversion function
+ */
+@SuppressWarnings("unchecked")
+private Function<Object, Object> resolveKeyConvertor(Environment env) {
+    String key = env.getProperty("jetcache.remote.default.keyConvertor", "fastjson");
+
+    switch (key.toLowerCase()) {
+        case "fastjson":
+            return FastjsonKeyConvertor.INSTANCE;
+        case "jackson":
+            return JacksonKeyConvertor.INSTANCE;
+        case "none":
+            return null; 
+        default:
+            try {
+                // Try to load custom Function class if provided
+                Class<?> clazz = Class.forName(key);
+                return (Function<Object, Object>) clazz.getDeclaredConstructor().newInstance();
+            } catch (Exception e) {
+                // Log the error if necessary and fallback to default
+                return FastjsonKeyConvertor.INSTANCE;
+            }
+    }
+}
