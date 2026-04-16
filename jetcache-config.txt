@@ -620,3 +620,26 @@ public class JetCacheRedisConfig {
         };
     }
 }
+
+/**
+     * Resolves the key converter function.
+     * JetCache built-in converters (Fastjson, Jackson) implement Function<Object, Object>.
+     */
+    @SuppressWarnings("unchecked")
+    private Function<Object, Object> resolveKeyConvertor(Environment env) {
+        String key = env.getProperty("jetcache.remote.default.keyConvertor", "fastjson");
+
+        return switch (key.toLowerCase()) {
+            case "fastjson" -> FastjsonKeyConvertor.INSTANCE;
+            case "jackson" -> JacksonKeyConvertor.INSTANCE;
+            case "none" -> null; // JetCache handles null as no conversion
+            default -> {
+                try {
+                    // Try to load custom Function class if provided
+                    Class<?> clazz = Class.forName(key);
+                    yield (Function<Object, Object>) clazz.getDeclaredConstructor().newInstance();
+                } catch (Exception e) {
+                    yield FastjsonKeyConvertor.INSTANCE;
+                }
+            }
+        };
