@@ -199,3 +199,236 @@ public class JetCacheRedisConfig {
         return builder;
     }
 }
+
+
+
+
+/// New version
+
+@SpringBootApplication(
+    exclude = com.alicp.jetcache.autoconfigure.RedisLettuceAutoConfiguration.class
+)
+
+package com.example.config;
+
+import com.alicp.jetcache.CacheBuilder;
+import com.alicp.jetcache.redis.lettuce.JetCacheCodec;
+import com.alicp.jetcache.redis.lettuce.RedisLettuceCacheBuilder;
+import io.lettuce.core.AbstractRedisClient;
+import io.lettuce.core.RedisClient;
+import io.lettuce.core.RedisURI;
+import io.lettuce.core.api.StatefulConnection;
+import io.lettuce.core.masterreplica.MasterReplica;
+import io.lettuce.core.pubsub.StatefulRedisPubSubConnection;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
+import org.springframework.boot.autoconfigure.data.redis.RedisProperties;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+/**
+ * Custom Redis configuration for JetCache using Lettuce.
+ *
+ * <p>
+ * This configuration replaces JetCache's default Redis auto-configuration to support:
+ * <ul>
+ *     <li>Redis Sentinel with authentication (both Redis and Sentinel passwords)</li>
+ *     <li>Standalone Redis for local development</li>
+ *     <li>JetCache broadcastChannel via Redis Pub/Sub</li>
+ * </ul>
+ *
+ * <p>
+ * Why this is needed:
+ * <ul>
+ *     <li>JetCache (2.7.x) does NOT support Sentinel password in its default auto-config</li>
+ *     <li>Spring Data Redis DOES support Sentinel password correctly</li>
+ *     <li>We bridge that gap by building RedisURI manually from Spring properties</li>
+ * </ul>
+ *
+ * <p>
+ * Behaviour:
+ * <ul>
+ *     <li>If {@code spring.redis.sentinel.nodes} is present → Sentinel mode</li>
+ *     <li>Otherwise → standalone Redis mode (local dev)</li>
+ * </ul>
+ *
+ * <p>
+ * IMPORTANT:
+ * <ul>
+ *     <li>You MUST exclude {@code RedisLettuceAutoConfiguration}</li>
+ *     <li>This class becomes the single source of truth for JetCache Redis connections</li>
+ * </ul>
+ */
+@Configuration
+@ConditionalOnBean(RedisProperties.class)
+public class JetCacheRedisConfig {
+
+    /**
+     * Builds a RedisURI based on Spring Boot RedisProperties.
+     *
+     * <p>
+     * Supports two modes:
+     * <ul>
+     *     <li><b>Sentinel mode:</b> when sentinel nodes are configured</li>
+     *     <li><b>Standalone mode:</b> fallback for local development</li>
+     * </ul>
+     *
+     * <p>
+     * In Sentinel mode, this includes:
+     * <ul>
+     *     <li>Sentinel nodes</li>
+     *     <li>Sentinel master ID</li>
+     *     <li>Redis password</li>
+     *     <li>Sentinel password</li>
+     * </ul>
+     *
+     * @param redisProperties Spring Redis configuration
+     * @return fully configured RedisURI
+     */
+    @Bean
+    public RedisURI jetCacheRedisURI(RedisProperties redisProperties) {
+
+        RedisProperties.Sentinel sentinel = redisProperties.getSentinel();
+
+        // Sentinel mode
+        if (sentinel != null && sentinel.getNodes() != null && !sentinel.getNodes().isEmpty()) {
+
+            RedisURI.Builder builder = RedisURI.builder()
+                    .withSentinelMasterId(sentinel.getMaster());
+
+            for (String node : sentinel.getNodes()) {
+                String[] parts = node.split(":");
+                builder.withSentinel(parts[0], Integer.parseInt(parts[1]));
+            }
+
+            if (redisProperties.getPassword() != null) {
+                builder.withPassword(redisProperties.getPassword().toCharArray());
+            }
+
+            if (sentinel.getPassword() != null) {
+                builder.withSentinelPassword(sentinel.getPassword().toCharArray());
+            }
+
+            builder.withDatabase(redisProperties.getDatabase());
+            return builder.build();
+        }
+
+        // Standalone mode (local/dev)
+        RedisURI.Builder builder = RedisURI.builder()
+                .withHost(redisProperties.getHost() != null ? redisProperties.getHost() : "localhost")
+                .withPort(redisProperties.getPort() != null ? redisProperties.getPort() : 6379)
+                .withDatabase(redisProperties.getDatabase());
+
+        if (redisProperties.getPassword() != null) {
+            builder.withPassword(redisProperties.getPassword().toCharArray());
+        }
+
+        return builder.build();
+    }
+
+    /**
+     * Creates a RedisClient instance.
+     *
+     * <p>
+     * Behaviour differs slightly by mode:
+     * <ul>
+     *     <li>Sentinel mode → client created without binding to a single node</li>
+     *     <li>Standalone mode → client bound to the RedisURI</li>
+     * </ul>
+     *
+     * @param redisURI constructed RedisURI
+     * @return Lettuce Redis client
+     */
+    @Bean(destroyMethod = "shutdown")
+    public AbstractRedisClient jetCacheRedisClient(RedisURI redisURI) {
+
+        if (redisURI.getSentinelMasterId() != null) {
+            // Sentinel mode: topology resolved dynamically
+            return RedisClient.create();
+        } else {
+            // Standalone mode
+            return RedisClient.create(redisURI);
+        }
+    }
+
+    /**
+     * Creates the main Redis connection used by JetCache for data operations.
+     *
+     * <p>
+     * Behaviour:
+     * <ul>
+     *     <li>Sentinel mode → uses MasterReplica (auto failover support)</li>
+     *     <li>Standalone mode → direct connection</li>
+     * </ul>
+     *
+     * @param client Redis client
+     * @param redisURI Redis connection definition
+     * @return stateful Redis connection
+     */
+    @Bean(destroyMethod = "close")
+    public StatefulConnection<byte[], byte[]> jetCacheConnection(
+            AbstractRedisClient client,
+            RedisURI redisURI) {
+
+        if (redisURI.getSentinelMasterId() != null) {
+            return MasterReplica.connect(client, new JetCacheCodec(), redisURI);
+        } else {
+            return ((RedisClient) client).connect(new JetCacheCodec(), redisURI);
+        }
+    }
+
+    /**
+     * Creates a Pub/Sub connection for JetCache broadcastChannel.
+     *
+     * <p>
+     * This is required for cache invalidation across multiple application instances.
+     *
+     * <p>
+     * IMPORTANT:
+     * <ul>
+     *     <li>Uses the same RedisURI to ensure identical authentication and topology</li>
+     *     <li>Works in both Sentinel and standalone modes</li>
+     * </ul>
+     *
+     * @param client Redis client
+     * @param redisURI Redis connection definition
+     * @return pub/sub connection
+     */
+    @Bean(destroyMethod = "close")
+    public StatefulRedisPubSubConnection<byte[], byte[]> jetCachePubSubConnection(
+            AbstractRedisClient client,
+            RedisURI redisURI) {
+
+        return ((RedisClient) client).connectPubSub(new JetCacheCodec(), redisURI);
+    }
+
+    /**
+     * Configures JetCache Redis cache builder.
+     *
+     * <p>
+     * This bean is the core integration point with JetCache.
+     * It wires together:
+     * <ul>
+     *     <li>Data connection</li>
+     *     <li>Pub/Sub connection (broadcastChannel)</li>
+     *     <li>Redis client</li>
+     * </ul>
+     *
+     * @param connection main Redis connection
+     * @param pubSubConnection pub/sub connection
+     * @param client Redis client
+     * @return JetCache CacheBuilder
+     */
+    @Bean
+    public CacheBuilder<?> jetCacheRemoteCacheBuilder(
+            StatefulConnection<byte[], byte[]> connection,
+            StatefulRedisPubSubConnection<byte[], byte[]> pubSubConnection,
+            AbstractRedisClient client) {
+
+        return RedisLettuceCacheBuilder.createRedisLettuceCacheBuilder()
+                .connection(connection)
+                .pubSubConnection(pubSubConnection)
+                .redisClient(client)
+                .valueEncoder(JetCacheCodec.INSTANCE::encode)
+                .valueDecoder(JetCacheCodec.INSTANCE::decode);
+    }
+}
