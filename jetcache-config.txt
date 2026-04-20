@@ -1037,3 +1037,28 @@ public void onApplicationEvent(ContextRefreshedEvent event) {
         // Fallback or log
     }
 }
+
+
+// Remove bean forcefully
+
+@Configuration
+@EnableConfigurationProperties(RedisProperties.class)
+public class JetCacheRedisConfig implements ApplicationListener<ContextRefreshedEvent> {
+
+    /**
+     * This physically removes the faulty JetCache config from Spring's memory
+     * before it has a chance to trigger the Sentinel error.
+     */
+    @Bean
+    public static BeanDefinitionRegistryPostProcessor autoConfigExcluder() {
+        return registry -> {
+            String faultyConfig = "com.alicp.jetcache.autoconfigure.RedisLettuceAutoConfiguration";
+            if (registry.containsBeanDefinition(faultyConfig)) {
+                registry.removeBeanDefinition(faultyConfig);
+                System.out.println(">>>> Successfully intercepted and removed " + faultyConfig);
+            }
+        };
+    }
+    
+    // ... rest of your manual beans (URI, Client, Connection, etc.) ...
+}
