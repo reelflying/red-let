@@ -724,3 +724,32 @@ public class JetCacheRedisConfig {
                 .valueDecoder(JavaValueDecoder.INSTANCE);
     }
 }
+
+// Broadcast channel update
+
+@Bean(name = "customRemoteCacheBuilder")
+public CacheBuilder<Object, Object> jetCacheRemoteCacheBuilder(
+        @Qualifier("customJetCacheConnection") StatefulConnection<byte[], byte[]> connection,
+        @Qualifier("customJetCachePubSub") StatefulRedisPubSubConnection<byte[], byte[]> pubSubConnection,
+        @Qualifier("customJetCacheClient") AbstractRedisClient client,
+        Environment env) {
+
+    // 1. Manually resolve the broadcast channel from YAML
+    // Typical property: jetcache.remote.default.broadcastChannel
+    String channel = env.getProperty("jetcache.remote.default.broadcastChannel");
+
+    RedisLettuceCacheBuilder<Object, Object> builder = RedisLettuceCacheBuilder.createRedisLettuceCacheBuilder()
+            .connection(connection)
+            .redisClient(client)
+            .keyConvertor(resolveKeyConvertor(env))
+            .valueEncoder(JavaValueEncoder.INSTANCE)
+            .valueDecoder(JavaValueDecoder.INSTANCE);
+
+    // 2. If a channel is defined, attach the Pub/Sub connection
+    if (channel != null && !channel.isEmpty()) {
+        builder.pubSubConnection(pubSubConnection)
+               .broadcastChannel(channel); 
+    }
+
+    return builder;
+}
