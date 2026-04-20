@@ -870,56 +870,129 @@ public class JetCacheRedisConfig {
 
 //More changes
 
+package com.example.config;
+
+import com.alicp.jetcache.CacheBuilder;
+import com.alicp.jetcache.autoconfigure.AutoConfigureBeans;
+import com.alicp.jetcache.redis.lettuce.JetCacheCodec;
+import com.alicp.jetcache.redis.lettuce.LettuceConnectionManager;
+import com.alicp.jetcache.redis.lettuce.RedisLettuceCacheBuilder;
+import com.alicp.jetcache.support.FastjsonKeyConvertor;
+import com.alicp.jetcache.support.JacksonKeyConvertor;
+import com.alicp.jetcache.support.JavaValueDecoder;
+import com.alicp.jetcache.support.JavaValueEncoder;
+import io.lettuce.core.AbstractRedisClient;
+import io.lettuce.core.RedisClient;
+import io.lettuce.core.RedisURI;
+import io.lettuce.core.api.StatefulConnection;
+import io.lettuce.core.masterreplica.MasterReplica;
+import io.lettuce.core.pubsub.StatefulRedisPubSubConnection;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.autoconfigure.data.redis.RedisProperties;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.ApplicationListener;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.context.event.ContextRefreshedEvent;
+import org.springframework.core.env.Environment;
+
+import java.util.function.Function;
+
 @Configuration
 @EnableConfigurationProperties(RedisProperties.class)
-public class JetCacheRedisConfig {
+public class JetCacheRedisConfig implements ApplicationListener<ContextRefreshedEvent> {
 
-    // 1. Use ObjectProvider to prevent the circular loop during startup
-    @Autowired
-    private ObjectProvider<AutoConfigureBeans> autoConfigureBeansProvider;
+    private final Environment env;
 
-    @Autowired
-    private Environment env;
-
-    // ... Keep your RedisURI, Client, Connection, and PubSub beans as they are ...
+    public JetCacheRedisConfig(Environment env) {
+        this.env = env;
+    }
 
     /**
-     * This method runs AFTER all beans are created. 
-     * It fetches the AutoConfigureBeans registry lazily to avoid the loop.
+     * This is the "Nuclear Option" to solve circular dependencies.
+     * We wait until the entire Spring Context is refreshed (all beans exist).
      */
-    @Autowired
-    public void configureJetCacheRegistry(
-            @Qualifier("customJetCacheClient") AbstractRedisClient client,
-            @Qualifier("customJetCacheConnection") StatefulConnection<byte[], byte[]> connection) {
-        
-        AutoConfigureBeans registry = autoConfigureBeansProvider.getIfAvailable();
-        if (registry == null) {
-            return;
-        }
+    @Override
+    public void onApplicationEvent(ContextRefreshedEvent event) {
+        try {
+            AutoConfigureBeans registry = event.getApplicationContext().getBean(AutoConfigureBeans.class);
+            AbstractRedisClient client = (AbstractRedisClient) event.getApplicationContext().getBean("customJetCacheClient");
+            StatefulConnection<byte[], byte[]> connection = (StatefulConnection<byte[], byte[]>) event.getApplicationContext().getBean("customJetCacheConnection");
 
-        System.out.println(">>>> Registering custom Sentinel beans into JetCache Container <<<<");
-        String prefix = "remote.default";
+            System.out.println(">>>> Context Refreshed: Registering Sentinel-authenticated beans <<<<");
+            
+            String prefix = "remote.default";
+            registry.getCustomContainer().put(prefix + ".client", client);
+
+            LettuceConnectionManager m = LettuceConnectionManager.defaultManager();
+            m.init(client, connection);
+
+            registry.getCustomContainer().put(prefix + ".connection", connection);
+            registry.getCustomContainer().put(prefix + ".commands", m.commands(client));
+            registry.getCustomContainer().put(prefix + ".asyncCommands", m.asyncCommands(client));
+            
+        } catch (Exception e) {
+            System.err.println("Failed to manually wire JetCache: " + e.getMessage());
+        }
+    }
+
+    @Bean
+    public RedisURI jetCacheRedisURI(RedisProperties redisProperties) {
+        RedisProperties.Sentinel sentinel = redisProperties.getSentinel();
+        if (sentinel != null && sentinel.getNodes() != null && !sentinel.getNodes().isEmpty()) {
+            RedisURI.Builder builder = RedisURI.builder().withSentinelMasterId(sentinel.getMaster());
+            for (String node : sentinel.getNodes()) {
+                String[] parts = node.split(":");
+                builder.withSentinel(parts[0], parts.length > 1 ? Integer.parseInt(parts[1]) : 26379);
+            }
+            if (redisProperties.getPassword() != null) {
+                builder.withPassword(redisProperties.getPassword().toCharArray());
+            }
+            RedisURI finalUri = builder.build();
+            if (sentinel.getPassword() != null) {
+                finalUri.getSentinels().forEach(s -> s.setPassword(sentinel.getPassword()));
+            }
+            finalUri.setDatabase(redisProperties.getDatabase());
+            return finalUri;
+        }
         
-        // Feed your authenticated beans into the container
-        registry.getCustomContainer().put(prefix + ".client", client);
-        
-        LettuceConnectionManager m = LettuceConnectionManager.defaultManager();
-        m.init(client, connection);
-        
-        registry.getCustomContainer().put(prefix + ".connection", connection);
-        registry.getCustomContainer().put(prefix + ".commands", m.commands(client));
-        registry.getCustomContainer().put(prefix + ".asyncCommands", m.asyncCommands(client));
+        return RedisURI.builder()
+                .withHost(redisProperties.getHost() != null ? redisProperties.getHost() : "localhost")
+                .withPort(redisProperties.getPort() != null ? redisProperties.getPort() : 6379)
+                .withPassword(redisProperties.getPassword() != null ? redisProperties.getPassword().toCharArray() : null)
+                .withDatabase(redisProperties.getDatabase())
+                .build();
+    }
+
+    @Bean(name = "customJetCacheClient", destroyMethod = "shutdown")
+    public AbstractRedisClient customJetCacheClient(RedisURI redisURI) {
+        return RedisClient.create(redisURI);
+    }
+
+    @Bean(name = "customJetCacheConnection", destroyMethod = "close")
+    public StatefulConnection<byte[], byte[]> customJetCacheConnection(
+            @Qualifier("customJetCacheClient") AbstractRedisClient client,
+            RedisURI redisURI) {
+        JetCacheCodec codec = new JetCacheCodec();
+        if (redisURI.getSentinelMasterId() != null) {
+            return MasterReplica.connect((RedisClient) client, codec, redisURI);
+        } else {
+            return ((RedisClient) client).connect(codec, redisURI);
+        }
+    }
+
+    @Bean(name = "customJetCachePubSub", destroyMethod = "close")
+    public StatefulRedisPubSubConnection<byte[], byte[]> customJetCachePubSubConnection(
+            @Qualifier("customJetCacheClient") AbstractRedisClient client,
+            RedisURI redisURI) {
+        return ((RedisClient) client).connectPubSub(new JetCacheCodec(), redisURI);
     }
 
     @Bean(name = "customRemoteCacheBuilder")
     public CacheBuilder jetCacheRemoteCacheBuilder(
             @Qualifier("customJetCacheConnection") StatefulConnection<byte[], byte[]> connection,
-            @Qualifier("customJetCachePubSub") StatefulRedisPubSubConnection<byte[], byte[]> pubSubConnection,
             @Qualifier("customJetCacheClient") AbstractRedisClient client) {
 
-        // Note: BroadcastChannel logic is internal to JetCache. 
-        // By putting the client/connection into the registry above, 
-        // JetCache's internal listeners will pick up the channel from your YAML automatically.
         return RedisLettuceCacheBuilder.createRedisLettuceCacheBuilder()
                 .connection(connection)
                 .redisClient(client)
