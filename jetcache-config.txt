@@ -1010,3 +1010,30 @@ public class JetCacheRedisConfig implements ApplicationListener<ContextRefreshed
         }
     }
 }
+
+// Another change
+@Override
+public void onApplicationEvent(ContextRefreshedEvent event) {
+    try {
+        AutoConfigureBeans registry = event.getApplicationContext().getBean(AutoConfigureBeans.class);
+        AbstractRedisClient client = (AbstractRedisClient) event.getApplicationContext().getBean("customJetCacheClient");
+        StatefulConnection<byte[], byte[]> connection = (StatefulConnection<byte[], byte[]>) event.getApplicationContext().getBean("customJetCacheConnection");
+
+        String prefix = "remote.default";
+        
+        // Ensure the client is in the registry for the broadcast listener to find
+        registry.getCustomContainer().put(prefix + ".client", client);
+
+        LettuceConnectionManager m = LettuceConnectionManager.defaultManager();
+        m.init(client, connection);
+
+        // These keys are what JetCache uses to execute Redis commands internally
+        registry.getCustomContainer().put(prefix + ".connection", connection);
+        registry.getCustomContainer().put(prefix + ".commands", m.commands(client));
+        registry.getCustomContainer().put(prefix + ".asyncCommands", m.asyncCommands(client));
+        
+        System.out.println(">>>> JetCache Sentinel Wiring Complete <<<<");
+    } catch (Exception e) {
+        // Fallback or log
+    }
+}
