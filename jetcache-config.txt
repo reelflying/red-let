@@ -673,3 +673,54 @@ private Function<Object, Object> resolveKeyConvertor(Environment env) {
             }
     }
 }
+
+
+// Add Qualifier
+
+@Configuration
+@EnableConfigurationProperties(RedisProperties.class)
+public class JetCacheRedisConfig {
+
+    // ... your URI and init code ...
+
+    @Bean(name = "customJetCacheClient", destroyMethod = "shutdown")
+    public AbstractRedisClient jetCacheRedisClient(RedisURI redisURI) {
+        return RedisClient.create(redisURI);
+    }
+
+    @Bean(name = "customJetCacheConnection", destroyMethod = "close")
+    public StatefulConnection<byte[], byte[]> jetCacheConnection(
+            @Qualifier("customJetCacheClient") AbstractRedisClient client,
+            RedisURI redisURI) {
+        
+        JetCacheCodec codec = new JetCacheCodec();
+        if (redisURI.getSentinelMasterId() != null) {
+            return MasterReplica.connect((RedisClient) client, codec, redisURI);
+        } else {
+            return ((RedisClient) client).connect(codec, redisURI);
+        }
+    }
+
+    @Bean(name = "customJetCachePubSub", destroyMethod = "close")
+    public StatefulRedisPubSubConnection<byte[], byte[]> jetCachePubSubConnection(
+            @Qualifier("customJetCacheClient") AbstractRedisClient client,
+            RedisURI redisURI) {
+        return ((RedisClient) client).connectPubSub(new JetCacheCodec(), redisURI);
+    }
+
+    @Bean(name = "customRemoteCacheBuilder")
+    public CacheBuilder<Object, Object> jetCacheRemoteCacheBuilder(
+            @Qualifier("customJetCacheConnection") StatefulConnection<byte[], byte[]> connection,
+            @Qualifier("customJetCachePubSub") StatefulRedisPubSubConnection<byte[], byte[]> pubSubConnection,
+            @Qualifier("customJetCacheClient") AbstractRedisClient client,
+            Environment env) {
+
+        return RedisLettuceCacheBuilder.createRedisLettuceCacheBuilder()
+                .connection(connection)
+                .pubSubConnection(pubSubConnection)
+                .redisClient(client)
+                .keyConvertor(resolveKeyConvertor(env))
+                .valueEncoder(JavaValueEncoder.INSTANCE)
+                .valueDecoder(JavaValueDecoder.INSTANCE);
+    }
+}
