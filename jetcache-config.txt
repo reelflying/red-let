@@ -866,3 +866,41 @@ public class JetCacheRedisConfig {
         }
     }
 }
+
+
+//More changes
+
+@Configuration
+@EnableConfigurationProperties(RedisProperties.class)
+public class JetCacheRedisConfig {
+
+    @Autowired
+    private AutoConfigureBeans autoConfigureBeans;
+
+    // ... (Your RedisURI, Client, Connection, and PubSub beans remain exactly the same) ...
+
+    /**
+     * Fix: Instead of @PostConstruct, we use a dedicated method that 
+     * Spring calls only after the necessary beans are fully realized.
+     */
+    @Autowired
+    public void configureJetCacheRegistry(
+            @Qualifier("customJetCacheClient") AbstractRedisClient client,
+            @Qualifier("customJetCacheConnection") StatefulConnection<byte[], byte[]> connection) {
+        
+        System.out.println(">>>> Registering custom Sentinel beans into JetCache Container <<<<");
+        
+        String prefix = "remote.default";
+        
+        // 1. Register the authenticated client
+        autoConfigureBeans.getCustomContainer().put(prefix + ".client", client);
+        
+        // 2. Initialize and register the connection manager
+        LettuceConnectionManager m = LettuceConnectionManager.defaultManager();
+        m.init(client, connection);
+        
+        autoConfigureBeans.getCustomContainer().put(prefix + ".connection", connection);
+        autoConfigureBeans.getCustomContainer().put(prefix + ".commands", m.commands(client));
+        autoConfigureBeans.getCustomContainer().put(prefix + ".asyncCommands", m.asyncCommands(client));
+    }
+}
