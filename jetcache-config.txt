@@ -1090,3 +1090,40 @@ public void onApplicationEvent(ContextRefreshedEvent event) {
         // Log error
     }
 }
+
+
+// Redisson client
+
+@Bean(name = "redisClientBeanName")
+public RedissonClient redissonClient(RedisProperties redisProperties) {
+    Config config = new Config();
+    
+    // 1. Sentinel Logic
+    if (redisProperties.getSentinel() != null && !redisProperties.getSentinel().getNodes().isEmpty()) {
+        SentinelServersConfig sentinelConfig = config.useSentinelServers()
+            .setMasterName(redisProperties.getSentinel().getMaster())
+            .setDatabase(redisProperties.getDatabase())
+            .setPassword(redisProperties.getPassword());
+
+        if (redisProperties.getSentinel().getPassword() != null) {
+            sentinelConfig.setSentinelPassword(redisProperties.getSentinel().getPassword());
+        }
+
+        for (String node : redisProperties.getSentinel().getNodes()) {
+            sentinelConfig.addSentinelAddress("redis://" + node);
+        }
+    } 
+    // 2. Standalone Logic (Defaulting to localhost:6379)
+    else {
+        // Fallback to standard defaults if properties are null
+        String host = (redisProperties.getHost() != null) ? redisProperties.getHost() : "127.0.0.1";
+        int port = (redisProperties.getPort() != 0) ? redisProperties.getPort() : 6379;
+
+        config.useSingleServer()
+            .setAddress("redis://" + host + ":" + port)
+            .setDatabase(redisProperties.getDatabase())
+            .setPassword(redisProperties.getPassword());
+    }
+
+    return Redisson.create(config);
+}
