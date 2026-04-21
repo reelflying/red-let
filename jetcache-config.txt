@@ -1206,3 +1206,27 @@ public class RedissonConfig {
         // Implementation goes here...
     }
 }
+
+
+import com.alicp.jetcache.Cache;
+import com.alicp.jetcache.CacheManager;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+
+@Service
+public class CacheService {
+
+    @Autowired
+    private CacheManager cacheManager;
+
+    public void clearWholeCache(String cacheName) {
+        // Retrieve the cache by the 'name' defined in @Cached or @CreateCache
+        Cache<Object, Object> myCache = cacheManager.getCache(cacheName);
+        
+        if (myCache != null) {
+            // This triggers the invalidation
+            // If using Redisson, this sends a message to the broadcastChannel
+            myCache.removeAll(null); 
+        }
+    }
+}
