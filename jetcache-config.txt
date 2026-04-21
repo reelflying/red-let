@@ -1154,3 +1154,10 @@ public RedissonClient redissonClient(RedisProperties redisProperties) {
         <version>2.0.40</version>
     </dependency>
 </dependencies>
+
+
+@Bean
+    public CacheManager cacheManager(RedissonClient redissonClient) {
+        // This bridges Spring's @Cacheable to your Redisson client
+        return new RedissonSpringCacheManager(redissonClient);
+    }
