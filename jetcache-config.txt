@@ -1230,3 +1230,22 @@ public class CacheService {
         }
     }
 }
+
+
+import com.alicp.jetcache.CacheManager;
+import com.alicp.jetcache.anno.support.SpringConfigProvider;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class RedissonConfig {
+
+    /**
+     * Explicitly exposes the JetCache CacheManager as a Spring Bean.
+     * Use this for programmatic cache operations like clearing an entire cache by name.
+     */
+    @Bean
+    public CacheManager jetCacheManager(SpringConfigProvider springConfigProvider) {
+        return springConfigProvider.getCacheContext().getCacheManager();
+    }
+}
