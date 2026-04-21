@@ -1161,3 +1161,48 @@ public RedissonClient redissonClient(RedisProperties redisProperties) {
         // This bridges Spring's @Cacheable to your Redisson client
         return new RedissonSpringCacheManager(redissonClient);
     }
+
+
+
+import org.redisson.api.RedissonClient;
+import org.springframework.boot.autoconfigure.data.redis.RedisProperties;
+import org.springframework.context.annotation.Configuration;
+
+/**
+ * Configuration class for initializing the {@link RedissonClient} used by JetCache.
+ * * <p>This configuration dynamically adapts to the environment by inspecting the 
+ * {@link RedisProperties} provided by Spring Boot. It supports two primary modes:
+ * <ul>
+ * <li><b>Sentinel Mode:</b> Activated if {@code spring.data.redis.sentinel.nodes} is populated.
+ * Supports master-slave discovery and Sentinel-specific authentication.</li>
+ * <li><b>Standalone Mode:</b> Default fallback for local development (defaults to 127.0.0.1:6379).</li>
+ * </ul>
+ * * <p>The resulting bean is named "redisClientBeanName" to match the JetCache 
+ * {@code remote.default.redissonClient} property in the application YAML.</p>
+ * * @author YourName
+ * @version 1.0
+ * @see org.redisson.api.RedissonClient
+ * @see com.alicp.jetcache.anno.Cached
+ */
+@Configuration
+public class RedissonConfig {
+
+    /**
+     * Creates and configures a {@link RedissonClient} bean.
+     * * <p>The method performs the following initialization logic:
+     * <ol>
+     * <li>Checks for Sentinel configuration. If present, it configures {@code useSentinelServers()},
+     * applying both the data node password and the sentinel-specific password.</li>
+     * <li>If no Sentinels are defined, it configures {@code useSingleServer()} using the 
+     * provided host and port, or defaults to 127.0.0.1:6379 if null.</li>
+     * <li>Prepends the "redis://" schema to addresses as required by Redisson's URI format.</li>
+     * </ol>
+     * * @param redisProperties The auto-configured Redis properties from {@code spring.data.redis}.
+     * @return A fully initialized {@link RedissonClient} instance.
+     * @throws IllegalArgumentException if the Sentinel master name is missing when nodes are provided.
+     */
+    @Bean(name = "redisClientBeanName")
+    public RedissonClient redissonClient(RedisProperties redisProperties) {
+        // Implementation goes here...
+    }
+}
