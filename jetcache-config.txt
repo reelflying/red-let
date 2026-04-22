@@ -1155,7 +1155,32 @@ public RedissonClient redissonClient(RedisProperties redisProperties) {
     </dependency>
 </dependencies>
 
-
+/**
+     * Provides the {@link org.springframework.cache.CacheManager} implementation required to 
+     * bridge Spring's {@code @Cacheable} abstraction with the {@link RedissonClient}.
+     * * <p>By defining this bean, the application overrides Spring Boot's default cache 
+     * auto-configuration (which typically uses Lettuce) in favor of Redisson. This 
+     * ensures that both standard Spring caching and JetCache utilize the same 
+     * underlying connection pool and Redis topology (Standalone or Sentinel).</p>
+     * * <p><b>Key behaviors of this manager:</b></p>
+     * <ul>
+     * <li><b>Auto-creation:</b> Caches are created dynamically upon the first request 
+     * from a {@code @Cacheable} or {@code @CacheEvict} method.</li>
+     * <li><b>Integration:</b> Uses the provided {@code RedissonClient}, allowing 
+     * re-use of existing authentication and connection settings.</li>
+     * <li><b>Consistency:</b> Resolves the {@code IllegalArgumentException} 
+     * commonly encountered when the Spring context lacks a concrete cache engine 
+     * to handle annotated methods.</li>
+     * </ul>
+     * * @param redissonClient The {@link RedissonClient} instance configured for this application.
+     * @return A {@link RedissonSpringCacheManager} instance compatible with Spring's Cache SPI.
+     * @see org.redisson.spring.cache.RedissonSpringCacheManager
+     * @see org.springframework.cache.annotation.EnableCaching
+     */
+    @Bean
+    public CacheManager cacheManager(RedissonClient redissonClient) {
+        return new RedissonSpringCacheManager(redissonClient);
+    }
 @Bean
     public CacheManager cacheManager(RedissonClient redissonClient) {
         // This bridges Spring's @Cacheable to your Redisson client
