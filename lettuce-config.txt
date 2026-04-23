@@ -1,72 +1,41 @@
 @Configuration
-public class JetCacheOverrideConfig {
+public class JetCacheManualConfig {
 
+    // Use the exact same bean name from the original class
     @Bean(name = RedisLettuceAutoConfiguration.AUTO_INIT_BEAN_NAME)
     public RedisLettuceAutoConfiguration.RedisLettuceAutoInit redisLettuceAutoInit() {
-        return new MyRedisLettuceAutoInit();
-    }
-}
+        return new RedisLettuceAutoConfiguration.RedisLettuceAutoInit() {
+            
+            @Override
+            protected CacheBuilder initCache(ConfigTree ct, String cacheAreaWithPrefix) {
+                // JETCACHE ORIGINAL CODE LOOKS FOR "uri" HERE.
+                // WE BYPASS THAT BY BUILDING OUR OWN RedisURI.
+                
+                String host = ct.getProperty("host", "127.0.0.1");
+                int port = Integer.parseInt(ct.getProperty("port", "6379"));
+                String password = ct.getProperty("password");
+                
+                RedisURI.Builder builder = RedisURI.Builder.redis(host, port);
+                if (password != null) {
+                    builder.withPassword(password.toCharArray());
+                }
+                RedisURI redisUri = builder.build();
 
+                // Build the client manually
+                RedisClient client = RedisClient.create(redisUri);
+                StatefulConnection<byte[], byte[]> connection = client.connect(new JetCacheCodec());
 
-public class MyRedisLettuceAutoInit
-        extends RedisLettuceAutoConfiguration.RedisLettuceAutoInit {
+                // Build the JetCache-specific builder
+                ExternalCacheBuilder externalCacheBuilder = RedisLettuceCacheBuilder
+                        .createRedisLettuceCacheBuilder()
+                        .connection(connection)
+                        .redisClient(client);
 
-    @Autowired
-    private RedisProps props;
+                // This helper method is in the parent class to handle common jetcache props
+                parseGeneralConfig(externalCacheBuilder, ct);
 
-    @Override
-    protected CacheBuilder initCache(ConfigTree ct, String cacheAreaWithPrefix) {
-
-        AbstractRedisClient client;
-        StatefulConnection<byte[], byte[]> connection;
-
-        if ("sentinel".equalsIgnoreCase(props.getMode())) {
-
-            RedisURI.Builder builder = RedisURI.builder()
-                    .withSentinelMasterId(props.getSentinelMaster());
-
-            props.getSentinels().forEach(s -> {
-                String[] hp = s.split(":");
-                builder.withSentinel(hp[0], Integer.parseInt(hp[1]));
-            });
-
-            if (props.getPassword() != null) {
-                builder.withPassword(props.getPassword().toCharArray());
+                return externalCacheBuilder;
             }
-
-            RedisClient redisClient = RedisClient.create();
-
-            client = redisClient;
-
-            connection = MasterReplica.connect(
-                    redisClient,
-                    new JetCacheCodec(),
-                    List.of(builder.build())
-            );
-
-        } else {
-            // standalone
-            RedisURI uri = RedisURI.builder()
-                    .withHost(props.getHost())
-                    .withPort(props.getPort())
-                    .withPassword(props.getPassword() == null
-                            ? null
-                            : props.getPassword().toCharArray())
-                    .build();
-
-            RedisClient redisClient = RedisClient.create(uri);
-
-            client = redisClient;
-            connection = redisClient.connect(new JetCacheCodec());
-        }
-
-        ExternalCacheBuilder builder = RedisLettuceCacheBuilder
-                .createRedisLettuceCacheBuilder()
-                .connection(connection)
-                .redisClient(client);
-
-        parseGeneralConfig(builder, ct);
-
-        return builder;
+        };
     }
 }
