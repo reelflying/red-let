@@ -1,151 +1,72 @@
-package com.yourpackage.config;
-
-import io.lettuce.core.RedisClient;
-import io.lettuce.core.RedisURI;
-import org.springframework.boot.autoconfigure.data.redis.RedisProperties;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-
-import java.time.Duration;
-import java.util.List;
-
 @Configuration
-public class RedisLettuceConfig {
+public class JetCacheOverrideConfig {
 
-    @Bean
-    public RedisClient redisClient(RedisProperties redisProperties) {
-
-        // 🔥 Sentinel mode
-        if (redisProperties.getSentinel() != null
-                && redisProperties.getSentinel().getNodes() != null
-                && !redisProperties.getSentinel().getNodes().isEmpty()) {
-
-            RedisProperties.Sentinel sentinel = redisProperties.getSentinel();
-
-            List<RedisURI> uris = sentinel.getNodes().stream()
-                    .map(node -> {
-                        String[] parts = node.split(":");
-                        String host = parts[0];
-                        int port = Integer.parseInt(parts[1]);
-
-                        RedisURI.Builder builder = RedisURI.Builder
-                                .sentinel(host, port, sentinel.getMaster());
-
-                        // ✅ Sentinel password
-                        if (sentinel.getPassword() != null) {
-                            builder.withSentinelPassword(
-                                    sentinel.getPassword().toCharArray());
-                        }
-
-                        // ✅ Redis password
-                        if (redisProperties.getPassword() != null) {
-                            builder.withPassword(
-                                    redisProperties.getPassword().toCharArray());
-                        }
-
-                        // Optional timeout
-                        if (redisProperties.getTimeout() != null) {
-                            builder.withTimeout(redisProperties.getTimeout());
-                        } else {
-                            builder.withTimeout(Duration.ofSeconds(5));
-                        }
-
-                        return builder.build();
-                    })
-                    .toList();
-
-            return RedisClient.create(uris);
-        }
-
-        // 🔥 Standalone mode (dev)
-        RedisURI.Builder builder = RedisURI.Builder.redis(
-                redisProperties.getHost() != null ? redisProperties.getHost() : "localhost",
-                redisProperties.getPort() != null ? redisProperties.getPort() : 6379
-        );
-
-        if (redisProperties.getPassword() != null) {
-            builder.withPassword(redisProperties.getPassword().toCharArray());
-        }
-
-        if (redisProperties.getTimeout() != null) {
-            builder.withTimeout(redisProperties.getTimeout());
-        } else {
-            builder.withTimeout(Duration.ofSeconds(5));
-        }
-
-        return RedisClient.create(builder.build());
+    @Bean(name = RedisLettuceAutoConfiguration.AUTO_INIT_BEAN_NAME)
+    public RedisLettuceAutoConfiguration.RedisLettuceAutoInit redisLettuceAutoInit() {
+        return new MyRedisLettuceAutoInit();
     }
 }
 
 
+public class MyRedisLettuceAutoInit
+        extends RedisLettuceAutoConfiguration.RedisLettuceAutoInit {
 
-package com.yourpackage.config;
+    @Autowired
+    private RedisProps props;
 
-import com.alicp.jetcache.CacheBuilder;
-import com.alicp.jetcache.CacheConsts;
-import com.alicp.jetcache.embedded.CaffeineCacheBuilder;
-import com.alicp.jetcache.embedded.EmbeddedCacheBuilder;
-import com.alicp.jetcache.external.ExternalCacheBuilder;
-import com.alicp.jetcache.anno.config.ConfigProvider;
-import com.alicp.jetcache.anno.config.GlobalCacheConfig;
-import com.alicp.jetcache.anno.config.SpringConfigProvider;
-import com.alicp.jetcache.redis.lettuce.LettuceCacheBuilder;
-import com.alicp.jetcache.support.FastjsonKeyConvertor;
-import com.alicp.jetcache.support.KryoValueDecoder;
-import com.alicp.jetcache.support.KryoValueEncoder;
-import io.lettuce.core.RedisClient;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
+    @Override
+    protected CacheBuilder initCache(ConfigTree ct, String cacheAreaWithPrefix) {
 
-import java.util.HashMap;
-import java.util.Map;
-import java.util.concurrent.TimeUnit;
+        AbstractRedisClient client;
+        StatefulConnection<byte[], byte[]> connection;
 
-@Configuration
-public class JetCacheConfig {
+        if ("sentinel".equalsIgnoreCase(props.getMode())) {
 
-    private static final String CACHE_AREA = CacheConsts.DEFAULT_AREA;
-    private static final String BROADCAST_CHANNEL = "jetcache-sync";
+            RedisURI.Builder builder = RedisURI.builder()
+                    .withSentinelMasterId(props.getSentinelMaster());
 
-    @Bean
-    public ConfigProvider configProvider(RedisClient redisClient) {
+            props.getSentinels().forEach(s -> {
+                String[] hp = s.split(":");
+                builder.withSentinel(hp[0], Integer.parseInt(hp[1]));
+            });
 
-        // 🔥 L2 - Redis (Lettuce)
-        ExternalCacheBuilder<?> l2Builder =
-                LettuceCacheBuilder.createLettuceCacheBuilder()
-                        .redisClient(redisClient)
-                        .keyConvertor(FastjsonKeyConvertor.INSTANCE)
-                        .valueEncoder(KryoValueEncoder.INSTANCE)
-                        .valueDecoder(KryoValueDecoder.INSTANCE)
-                        .broadcastChannel(BROADCAST_CHANNEL) // 🔥 cross-pod sync
-                        .expireAfterWrite(10, TimeUnit.MINUTES);
+            if (props.getPassword() != null) {
+                builder.withPassword(props.getPassword().toCharArray());
+            }
 
-        // 🔥 L1 - Caffeine
-        EmbeddedCacheBuilder<?> l1Builder =
-                CaffeineCacheBuilder.createCaffeineCacheBuilder()
-                        .keyConvertor(FastjsonKeyConvertor.INSTANCE)
-                        .expireAfterWrite(60, TimeUnit.SECONDS) // shorter TTL
-                        .limit(10_000); // prevent memory issues
+            RedisClient redisClient = RedisClient.create();
 
-        ConfigProvider cp = new SpringConfigProvider();
+            client = redisClient;
 
-        Map<String, CacheBuilder> remoteBuilders = new HashMap<>();
-        remoteBuilders.put(CACHE_AREA, l2Builder);
+            connection = MasterReplica.connect(
+                    redisClient,
+                    new JetCacheCodec(),
+                    List.of(builder.build())
+            );
 
-        Map<String, CacheBuilder> localBuilders = new HashMap<>();
-        localBuilders.put(CACHE_AREA, l1Builder);
+        } else {
+            // standalone
+            RedisURI uri = RedisURI.builder()
+                    .withHost(props.getHost())
+                    .withPort(props.getPort())
+                    .withPassword(props.getPassword() == null
+                            ? null
+                            : props.getPassword().toCharArray())
+                    .build();
 
-        cp.setRemoteCacheBuilders(remoteBuilders);
-        cp.setLocalCacheBuilders(localBuilders);
+            RedisClient redisClient = RedisClient.create(uri);
 
-        return cp;
-    }
+            client = redisClient;
+            connection = redisClient.connect(new JetCacheCodec());
+        }
 
-    @Bean
-    public GlobalCacheConfig globalCacheConfig(ConfigProvider configProvider) {
-        GlobalCacheConfig gc = new GlobalCacheConfig();
-        gc.setConfigProvider(configProvider);
-        gc.setStatIntervalMinutes(15); // optional stats
-        return gc;
+        ExternalCacheBuilder builder = RedisLettuceCacheBuilder
+                .createRedisLettuceCacheBuilder()
+                .connection(connection)
+                .redisClient(client);
+
+        parseGeneralConfig(builder, ct);
+
+        return builder;
     }
 }
