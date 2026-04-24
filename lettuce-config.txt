@@ -1,12 +1,15 @@
 spring.main.allow-bean-definition-overriding=true
 
-@SpringBootApplication(
+@SpringBootApplication
+@ComponentScan(
+    basePackages = "com.your.project", // Your base package
     excludeFilters = @ComponentScan.Filter(
         type = FilterType.ASSIGNABLE_TYPE, 
         classes = com.alicp.jetcache.autoconfigure.RedisLettuceAutoConfiguration.class
     )
 )
 
+public class MyApplication { ... }
 @Configuration
 public class JetCacheManualConfig {
 
