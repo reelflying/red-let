@@ -79,3 +79,130 @@ public class JetCacheManualConfig {
         };
     }
 }
+
+
+
+@Override
+protected CacheBuilder initCache(ConfigTree ct, String cacheAreaWithPrefix) {
+    // 1. Basic Configuration
+    String mode = ct.getProperty("mode", "standalone");
+    String password = ct.getProperty("password");
+    int database = Integer.parseInt(ct.getProperty("database", "0"));
+    long asyncResultTimeoutInMillis = ct.getProperty("asyncResultTimeoutInMillis", 
+            CacheConsts.ASYNC_RESULT_TIMEOUT.toMillis());
+    
+    // JetCache uses this to determine if it should initialize PubSub for invalidation
+    boolean enablePubSub = parseBroadcastChannel(ct) != null;
+
+    AbstractRedisClient client;
+    StatefulConnection<byte[], byte[]> connection;
+    StatefulRedisPubSubConnection<byte[], byte[]> pubSubConnection = null;
+
+    // 2. Build RedisURIs based on Mode
+    List<RedisURI> uriList = buildUriList(ct, mode, password, database);
+
+    // 3. Initialize Clients and Connections
+    if ("cluster".equalsIgnoreCase(mode)) {
+        RedisClusterClient clusterClient = RedisClusterClient.create(uriList);
+        clusterClient.setOptions(buildClusterOptions(ct));
+        
+        client = clusterClient;
+        connection = clusterClient.connect(new JetCacheCodec());
+        
+        if (enablePubSub) {
+            // Cluster PubSub connection
+            pubSubConnection = clusterClient.connectPubSub(new JetCacheCodec());
+        }
+    } else {
+        RedisClient redisClient = RedisClient.create();
+        redisClient.setOptions(ClientOptions.builder()
+                .disconnectedBehavior(ClientOptions.DisconnectedBehavior.REJECT_COMMANDS).build());
+        
+        client = redisClient;
+        
+        // MasterReplica connection (supports Sentinel and Standalone)
+        StatefulRedisMasterReplicaConnection<byte[], byte[]> c = MasterReplica.connect(
+                redisClient, new JetCacheCodec(), uriList);
+        
+        String readFromStr = ct.getProperty("readFrom");
+        if (readFromStr != null) {
+            c.setReadFrom(ReadFrom.valueOf(readFromStr.trim()));
+        }
+        connection = c;
+
+        if (enablePubSub) {
+            // PubSub connection typically uses the first available node
+            pubSubConnection = redisClient.connectPubSub(new JetCacheCodec(), uriList.get(0));
+        }
+    }
+
+    // 4. Build JetCache ExternalCacheBuilder
+    ExternalCacheBuilder externalCacheBuilder = RedisLettuceCacheBuilder.createRedisLettuceCacheBuilder()
+            .connection(connection)
+            .pubSubConnection(pubSubConnection)
+            .redisClient(client)
+            .asyncResultTimeoutInMillis(asyncResultTimeoutInMillis);
+
+    parseGeneralConfig(externalCacheBuilder, ct);
+
+    // 5. Register in Container for Spring Autowiring
+    autoConfigureBeans.getCustomContainer().put(cacheAreaWithPrefix + ".client", client);
+    
+    LettuceConnectionManager m = LettuceConnectionManager.defaultManager();
+    m.init(client, connection);
+    
+    autoConfigureBeans.getCustomContainer().put(cacheAreaWithPrefix + ".connection", m.connection(client));
+    autoConfigureBeans.getCustomContainer().put(cacheAreaWithPrefix + ".commands", m.commands(client));
+    
+    if (pubSubConnection != null) {
+        autoConfigureBeans.getCustomContainer().put(cacheAreaWithPrefix + ".pubSubConnection", pubSubConnection);
+    }
+
+    return externalCacheBuilder;
+}
+
+/**
+ * Helper to build URI list without requiring the "uri" property
+ */
+private List<RedisURI> buildUriList(ConfigTree ct, String mode, String password, int database) {
+    if ("standalone".equalsIgnoreCase(mode)) {
+        String host = ct.getProperty("host", "127.0.0.1");
+        int port = Integer.parseInt(ct.getProperty("port", "6379"));
+        RedisURI.Builder builder = RedisURI.Builder.redis(host, port).withDatabase(database);
+        if (password != null) builder.withPassword(password.toCharArray());
+        return Collections.singletonList(builder.build());
+    }
+
+    String nodes = ct.getProperty("nodes"); // e.g. "host1:port1,host2:port2"
+    if (nodes == null) throw new CacheConfigException("nodes property is required for " + mode);
+
+    if ("sentinel".equalsIgnoreCase(mode)) {
+        String masterId = ct.getProperty("masterId");
+        RedisURI.Builder builder = RedisURI.Builder.sentinel(masterId).withDatabase(database);
+        if (password != null) builder.withPassword(password.toCharArray());
+        Arrays.stream(nodes.split(",")).forEach(n -> {
+            String[] parts = n.split(":");
+            builder.withSentinel(parts[0], Integer.parseInt(parts[1]));
+        });
+        return Collections.singletonList(builder.build());
+    }
+
+    // Cluster
+    return Arrays.stream(nodes.split(","))
+            .map(n -> {
+                String[] parts = n.split(":");
+                RedisURI.Builder builder = RedisURI.Builder.redis(parts[0], Integer.parseInt(parts[1]));
+                if (password != null) builder.withPassword(password.toCharArray());
+                return builder.build();
+            }).collect(Collectors.toList());
+}
+
+private ClusterClientOptions buildClusterOptions(ConfigTree ct) {
+    return ClusterClientOptions.builder()
+            .topologyRefreshOptions(ClusterTopologyRefreshOptions.builder()
+                    .enablePeriodicRefresh(Duration.ofSeconds(ct.getProperty("enablePeriodicRefresh", 60)))
+                    .enableAllAdaptiveRefreshTriggers()
+                    .build())
+            .disconnectedBehavior(ClientOptions.DisconnectedBehavior.REJECT_COMMANDS)
+            .build();
+}
