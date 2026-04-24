@@ -9,6 +9,34 @@ spring.main.allow-bean-definition-overriding=true
     )
 )
 
+@Configuration
+public class MyJetCacheConfig {
+
+    // Define a condition that matches your custom type
+    public static class CustomLettuceCondition extends JetCacheCondition {
+        public CustomLettuceCondition() {
+            super("custom.lettuce");
+        }
+    }
+
+    @Bean(name = RedisLettuceAutoConfiguration.AUTO_INIT_BEAN_NAME)
+    @Conditional(CustomLettuceCondition.class)
+    public RedisLettuceAutoConfiguration.RedisLettuceAutoInit customRedisLettuceAutoInit() {
+        return new RedisLettuceAutoConfiguration.RedisLettuceAutoInit() {
+            @Override
+            protected CacheBuilder initCache(ConfigTree ct, String cacheAreaWithPrefix) {
+                // The library bean is GONE because its condition failed.
+                // You are now free to use ct.getProperty("host") etc.
+                
+                String host = ct.getProperty("host");
+                // ... build your Lettuce client ...
+                return myBuilder;
+            }
+        };
+    }
+}
+
+
 public class MyApplication { ... }
 @Configuration
 public class JetCacheManualConfig {
