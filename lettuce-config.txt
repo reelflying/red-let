@@ -412,5 +412,19 @@ Here’s a **minimal, internal-codebase version** — stripped down to essential
 
 ---
 
-This is about as tight as it gets while still being useful to someone reading the code later.
+/**
+ * Manual JetCache configuration replacing auto-configuration.
+ *
+ * Builds Redis clients, connections, and cache builders for standalone,
+ * sentinel, or cluster modes with explicit lifecycle control.
+ */
+
+/**
+ * Registers a custom JetCache external cache initializer for Lettuce.
+ *
+ * Used to hook manual Redis/Lettuce configuration into JetCache auto-init
+ * under the given identifier.
+ *
+ * @return new {@link ExternalCacheAutoInit} for Lettuce integration
+ */
 
