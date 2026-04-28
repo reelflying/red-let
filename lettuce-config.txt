@@ -314,3 +314,103 @@ private void registerInContainer(String area, AbstractRedisClient client, Statef
     container.put(area + ".connection", conn);
     if (pubSub != null) container.put(area + ".pubSubConnection", pubSub);
 }
+
+// Javadoc
+
+Here’s a **minimal, internal-codebase version** — stripped down to essentials, no noise, still clear.
+
+---
+
+### `initCache`
+
+```java
+/**
+ * Builds and initializes a Redis-backed {@link CacheBuilder}.
+ *
+ * Handles mode resolution, URI creation, client/connection setup,
+ * builder assembly, and resource registration.
+ *
+ * @param ct config source
+ * @param cacheAreaWithPrefix cache area key
+ * @return configured {@link CacheBuilder}
+ */
+```
+
+---
+
+### `buildUriList`
+
+```java
+/**
+ * Creates {@link RedisURI} list for standalone, sentinel, or cluster mode.
+ *
+ * @param ct config source
+ * @param mode connection mode
+ * @return list of {@link RedisURI}
+ */
+```
+
+---
+
+### `createBaseUri`
+
+```java
+/**
+ * Creates a standalone {@link RedisURI}.
+ */
+```
+
+---
+
+### `createRedisClient`
+
+```java
+/**
+ * Creates {@link AbstractRedisClient} for the given mode.
+ */
+```
+
+---
+
+### `createMainConnection`
+
+```java
+/**
+ * Creates the primary {@link StatefulConnection}.
+ */
+```
+
+---
+
+### `createPubSubConnection`
+
+```java
+/**
+ * Creates Pub/Sub {@link StatefulRedisPubSubConnection}.
+ */
+```
+
+---
+
+### `createJetCacheBuilder`
+
+```java
+/**
+ * Creates and configures {@link ExternalCacheBuilder}.
+ */
+```
+
+---
+
+### `registerInContainer`
+
+```java
+/**
+ * Registers client and connections for lifecycle management.
+ */
+```
+
+---
+
+This is about as tight as it gets while still being useful to someone reading the code later.
+
